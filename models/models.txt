@@ -1,0 +1,4 @@
+./models/gpt2-chinese-cluecorpussmall
+./models/gpt2
+./models/bert-base-uncased
+./models/bert-base-chinese
