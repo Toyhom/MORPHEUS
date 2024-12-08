@@ -19,15 +19,10 @@ from transformers import AdamW, get_linear_schedule_with_warmup
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config
 from pytorch_lightning.plugins import DDPPlugin
 from models import MSModel,MSModel_EM
-from peft import LoraConfig, TaskType, PromptEncoderConfig, PrefixTuningConfig, PromptTuningConfig, get_peft_model
 import json
-# from pytorch_lightning.plugins import DeepSpeedPlugin
-
-random.seed(2025)
 
 
 def calculate_total_steps(train_dataset_size, batch_size, num_epochs, num_gpus):
-
     # 每个epoch中全局批次的数量
     global_batches_per_epoch = (train_dataset_size + batch_size - 1) // batch_size
     # 每个epoch中每个GPU处理的批次数量
@@ -37,7 +32,6 @@ def calculate_total_steps(train_dataset_size, batch_size, num_epochs, num_gpus):
     return total_steps_per_gpu
 
 def multi_task_loss(losses, epsilon=1e-8):
-
     weighted_losses = [li / (li.detach() + epsilon) for li in losses]
     total_loss = sum(weighted_losses)
     return total_loss
@@ -66,10 +60,9 @@ class MyData(pl.LightningDataModule):
             datas = json.load(f)
             random.shuffle(datas)
             count = 0
-            select_list = random.sample(range(len(datas)),len(datas)//100)
+            select_list = random.sample(range(len(datas)),len(datas)//10)
             for data in datas:
-                
-                
+
                 persona, context, response = data["persona"], data["context"], data["response"]
                 
                 if self.lang == "en":
@@ -93,9 +86,9 @@ class MyData(pl.LightningDataModule):
                 if context == "":
                     context = " "
                     
-
-
-                context = self.tokenizer.sep_token.join(persona) + self.tokenizer.sep_token + context
+                
+                if role_aware and count in select_list:
+                    context = self.tokenizer.sep_token.join(persona) + self.tokenizer.sep_token + context
                 
                 self.data_train.append([context, response, persona])
                 count+=1 
@@ -132,7 +125,6 @@ class MyData(pl.LightningDataModule):
                     context = " "
                     
 
-                context = self.tokenizer.sep_token.join(persona) + self.tokenizer.sep_token + context
                 
                 self.data_valid.append([context, response, persona])
 
@@ -152,8 +144,6 @@ class MyData(pl.LightningDataModule):
                         response = self.user_name + response
                     else:
                         response = self.bot_name + response
-
-
 
                 if len(context) == 0:
                     context = [" "]
@@ -207,7 +197,8 @@ class MyData(pl.LightningDataModule):
                 labels["input_ids"][i] = [-100] * len(sample_input_ids) + label_input_ids
                 
                 model_inputs["attention_mask"][i] = [1] * len(model_inputs["input_ids"][i])
-  
+            # print(model_inputs)
+
             for i in range(batch_size):
                 sample_input_ids = model_inputs["input_ids"][i]
                 label_input_ids = labels["input_ids"][i]
@@ -230,7 +221,19 @@ class MyData(pl.LightningDataModule):
             model_inputs["attention_mask"] = torch.tensor(model_inputs["attention_mask"])
             model_inputs["labels"] = torch.tensor(labels["input_ids"])
 
+            condition = []
+            for i in range(batch_size):
+                c_l = examples["persona"][i]
+                c_l = [x for x in c_l if x!=""]
+                while len(c_l) < self.seq_len:
+                    c_l += c_l
+                c_l = c_l[0:self.seq_len]
+                
+                condition = condition + c_l
+
+            condition = self.tokenizer(condition,padding=True, truncation=True, return_tensors="pt",add_special_tokens=True)
             batch = dict()
+            batch["condition"] = condition
             batch["input_ids"] = model_inputs["input_ids"]
             batch["attention_mask"] = model_inputs["attention_mask"]
             batch["labels"] = model_inputs["labels"]
@@ -256,10 +259,10 @@ class MyData(pl.LightningDataModule):
         return examples
 
     def train_dataloader(self):
-        return DataLoader(self.data_train, shuffle=True, collate_fn=self.data_collator, batch_size=self.batch_size)
+        return DataLoader(self.data_train[0:43410], shuffle=True, collate_fn=self.data_collator, batch_size=self.batch_size)
 
     def val_dataloader(self):
-        return DataLoader(self.data_valid, collate_fn=self.data_collator, batch_size=self.batch_size)
+        return DataLoader(self.data_valid[:3000], collate_fn=self.data_collator, batch_size=self.batch_size)
 
     def test_dataloader(self):
         return DataLoader(self.data_test, collate_fn=self.data_collator_test, batch_size=self.batch_size)
@@ -275,25 +278,29 @@ class MyLightningModel(pl.LightningModule):
         self.model_file = model_file
         self.lang = lang
 
-        # self.automatic_optimization = False
-        
+
         self.total_steps_hand = total_steps_hand
         self.val_step_outputs = []
 
     def training_step(self, batch, batch_idx):
-
+        tensorboard = self.logger.experiment
         
-        outputs = self.model(**batch)
-        loss = outputs.loss
+        loss = self.forward(**batch)
+        loss_dict = {'train_loss': loss[0]+loss[1]+loss[2], 'train_model_loss': loss[0], 'train_vae_loss': loss[1], 'train_code_loss': loss[2]}
+        
+        self.log('train_loss',loss[0]+loss[1]+loss[2],on_epoch=True,on_step = True,prog_bar=True,logger=True)
+        self.log('train_model_loss', loss[0],on_epoch=True,on_step = True,prog_bar=True,logger=True)
+        self.log('train_vae_loss', loss[1],on_epoch=True,on_step = True,prog_bar=True,logger=True)
+        self.log('train_code_loss', loss[2],on_epoch=True,on_step = True,prog_bar=True,logger=True)
 
-        self.log('train_loss',loss.item(),on_epoch=True,on_step = True,prog_bar=True,logger=True)
 
-        return loss
+        return loss[0]+loss[1]+loss[2]
+
 
 
     def validation_step(self, batch, batch_idx):
-        outputs = self.model(**batch)
-        loss = outputs.loss
+        loss = self.forward(**batch)
+        loss = torch.tensor(list(loss))[0]
         self.log('val_loss', loss.item(),on_epoch=True,on_step = True,prog_bar=True,logger=True)
         
         self.val_step_outputs.append(loss.item())
@@ -301,10 +308,10 @@ class MyLightningModel(pl.LightningModule):
     def on_validation_epoch_end(self):
         avg_loss = torch.tensor(self.val_step_outputs).mean()
         self.log('avg_val_loss', avg_loss,on_epoch=True,prog_bar=True,logger=True)
+
         self.val_step_outputs.clear()
         
     def test_step(self, batch, batch_idx):
-        # generat
         self.model.eval()
         
         temp_dict = {'persona':[],'context':[],'pred':[],'target':[]}
@@ -319,6 +326,8 @@ class MyLightningModel(pl.LightningModule):
             persona_context = batch["context"][b]
             gold_response = batch["response"][b]
 
+
+            # 判断persona_context编码超长
 
             while len(self.tokenizer.encode(self.tokenizer.cls_token + self.tokenizer.sep_token.join(persona_context) + self.tokenizer.eos_token + "<P2>",add_special_tokens=False)) > 512:
                 persona_context = persona_context[1:] 
@@ -363,7 +372,7 @@ class MyLightningModel(pl.LightningModule):
                 
             print(generated_response)
             
-
+            # generated_response = generated_response.split(self.tokenizer.eos_token)[0]
             batch["context"][b] = ''.join(batch["context"][b]).replace(self.tokenizer.sep_token,"").replace("<P2>","").replace("<P1>","")
             gold_response = gold_response.replace("<P2>","").replace("<P1>","")
 
@@ -413,8 +422,11 @@ class MyLightningModel(pl.LightningModule):
         )
         scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
         
-        
+
         return [optimizer], [scheduler]
+
+    def forward(self, input_ids, attention_mask, labels=None, condition=None):
+        return self.model(input_ids, attention_mask, labels, condition)
 
 
 import argparse
@@ -476,8 +488,6 @@ if __name__ == "__main__":
     
     model_file = model_file + "_" + "_".join([lang,"peft="+str(peft),"role_aware="+str(role_aware),initial_method,"seq_len="+str(seq_len),"codebook_num="+str(codebook_num),"centrifugal="+str(centrifugal)])
 
-
-
     if lang == "zh":
         model = AutoModelForCausalLM.from_pretrained("./models/gpt2-chinese-cluecorpussmall")
         tokenizer = AutoTokenizer.from_pretrained("./models/gpt2-chinese-cluecorpussmall")
@@ -486,13 +496,15 @@ if __name__ == "__main__":
         model = AutoModelForCausalLM.from_pretrained("./models/gpt2")
         tokenizer = AutoTokenizer.from_pretrained("./models/gpt2")        
         tokenizer.sep_token = tokenizer.eos_token
-        tokenizer.cls_token = tokenizer.eos_token
+        tokenizer.cls_token = tokenizer.eos_token 
         tokenizer.pad_token = tokenizer.eos_token
+
         special_tokens = {'additional_special_tokens': ["<P1>", "<P2>"]}
         tokenizer.add_special_tokens(special_tokens)
         model.resize_token_embeddings(len(tokenizer))
         model.tie_weights()
-
+ 
+        
     print(tokenizer.eos_token,tokenizer.eos_token_id)
     
     
@@ -501,64 +513,26 @@ if __name__ == "__main__":
     if em_init:
         dm.prepare_data()
         model_init = MSModel_EM(model,tokenizer,codebook_num=codebook_num,n=seq_len,centrifugal=centrifugal)
-        model_init.to("cuda:0")
+        model_init.to("cuda:3")
 
         from tqdm import tqdm
         for batch in tqdm(dm.train_dataloader()):
-            batch = {k: v.to("cuda:0") for k, v in batch.items()}
+            batch = {k: v.to("cuda:3") for k, v in batch.items()}
             persona_vector = model_init.forward(**batch)
             torch.save(persona_vector,"./vector/persona_vector_"+lang)
- 
+
         model_init.persona_vector = torch.unique(model_init.persona_vector, dim=0)
         torch.save(model_init.persona_vector,"./vector/persona_vector_"+lang)
-
         del model_init
     
 
+    model = MSModel(model,tokenizer,codebook_num=codebook_num,n=seq_len,freeze=freeze,centrifugal=centrifugal,init_method=initial_method,lang=lang)
+    
 
     train_dataset_size = 50000
     num_gpus = 1  
     total_steps_per_gpu = calculate_total_steps(train_dataset_size, batch_size, num_epochs, num_gpus)
-    print(f"Steps/GPU: {total_steps_per_gpu}")
-
-    # peft 
-    if peft == "lora":
-        peft_config = LoraConfig(task_type=TaskType.CAUSAL_LM, inference_mode=False, r=8, lora_alpha=32, lora_dropout=0.1)
-    elif peft == "p-tuning":
-        peft_config = config = PromptEncoderConfig(
-                peft_type="P_TUNING",
-                task_type=TaskType.CAUSAL_LM,
-                num_virtual_tokens=5,
-                token_dim=768,
-                num_transformer_submodules=1,
-                num_attention_heads=12,
-                num_layers=12,
-                encoder_reparameterization_type="MLP",
-                encoder_hidden_size=768,
-            )
-    elif peft == "prefix-tuning":
-        peft_config = PrefixTuningConfig(
-            peft_type="PREFIX_TUNING",
-            task_type=TaskType.CAUSAL_LM,
-            num_virtual_tokens=5,
-            token_dim=768,
-            num_transformer_submodules=1,
-            num_attention_heads=12,
-            num_layers=12,
-            encoder_hidden_size=768,
-        )
-    elif peft == "prompt-tuning":
-        peft_config = PromptTuningConfig(
-            task_type=TaskType.CAUSAL_LM,
-            num_virtual_tokens=5,
-        )
-
-    if peft:
-        model = get_peft_model(model, peft_config)
-        model.print_trainable_parameters()
-
-
-
+    print(f"Total Steps/GPU: {total_steps_per_gpu}")
 
 
     model = MyLightningModel(model,tokenizer,t_total=1,lr=lr,model_file=model_file,total_steps_hand=total_steps_per_gpu,lang=lang)
@@ -598,6 +572,11 @@ if __name__ == "__main__":
         callbacks=[learning_rate_callback, checkpoint_callback,early_stopping],
         logger = logger,
         accelerator = 'gpu',
+        # gradient_clip_val=0.5
+        # strategy="ddp_find_unused_parameters_false"
+        # limit_train_batches=50,
+        # limit_val_batches=20
+        # plugins=[DeepSpeedPlugin(stage=3)], 
     )  
 
     trainer.fit(model, datamodule=dm)
@@ -605,6 +584,7 @@ if __name__ == "__main__":
     
     best_model_path = checkpoint_callback.best_model_path
     
+    # best_model_path = ""
     
     best_model_state = torch.load(best_model_path)["state_dict"]
     model.load_state_dict(best_model_state, strict=False)
