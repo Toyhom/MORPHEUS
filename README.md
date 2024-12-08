@@ -1,5 +1,5 @@
 # MORPHEUS
-MORPHEUS: Modeling Role from Personalized Dialogue History by Exploring and Utilizing Latent Space(EMNLP 2024)
+**MORPHEUS: Modeling Role from Personalized Dialogue History by Exploring and Utilizing Latent Space(EMNLP 2024)**
 
 [Paper](https://aclanthology.org/2024.emnlp-main.437/) 
 
