@@ -47,38 +47,6 @@ class Consis_Data(pl.LightningDataModule):
         data_single = data_single.split('\n[SEP]\n')
         data = []
 
-        for i in range(len(data_single)):
-            if i+2 < len(data_single):
-                temp = data_single[i].split('\n')
-                n_temp = data_single[i+1].split('\n')
-                n_n_temp = data_single[i+2].split('\n')
-                
-                temp[1] = temp[1].split('<|endoftext|>')[-2]
-                n_temp[1] = n_temp[1].split('<|endoftext|>')[-2]
-                n_n_temp[1] = n_n_temp[1].split('<|endoftext|>')[-2]
-          
-
-               
-                data.append([temp[0],temp[1],temp[2],0])
-                
-               
-                data.append([temp[0],temp[1],n_temp[2],1])
-                
-      
-                if temp[0] == n_n_temp[0]:
-                    data.append([temp[0],temp[1],n_n_temp[2],2])
-
-                
-        data_single = data
-        
-        self.data_single = data_single
-        random.shuffle(self.data_single)
-        if stage == 'fit' or stage is None:
-            self.dataset_train = self.data_single[0:int(len(self.data_single)*0.9)]
-            self.dataset_valid = self.data_single[int(len(self.data_single)*0.9):]
-        if stage == 'test' or stage is None:
-            self.dataset_valid = self.data_single[int(len(self.data_single)*0.9):]
-
 
 
     def collate_fn(self,batch):
@@ -343,45 +311,5 @@ def predict(batch,lang,model_path_en="./models/consis_model_EN.ckpt",model_path_
     
     return y_predict
         
-    
 
-if __name__=='__main__':
-
-    model_file = 'T-Consis_Model_ZH'
-    dm = Consis_Data()
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='./models',
-        save_top_k=1,
-        monitor="val_loss",
-        mode="min",
-        save_weights_only = True,
-        filename= model_file + '-{epoch:02d}-{step}-{val_loss:.2f}-{val_acc:.2f}',
-        save_last=True
-    )
-    learning_rate_callback = LearningRateMonitor()
-    early_stopping = EarlyStopping(
-        monitor='val_loss', 
-        min_delta=0.0, 
-        patience=3, 
-        mode='min', 
-        strict=True
-    )
-    logger = TensorBoardLogger('log_consis', name='test')
-    
-    dm.setup('fit')
-    trainer = pl.Trainer(
-        default_root_dir='./models',
-        gradient_clip_val=0.5,
-        max_epochs=10,
-        gpus=1,
-        val_check_interval=3000,
-        callbacks=[learning_rate_callback, checkpoint_callback,early_stopping],
-        logger = logger,
-    )  
-    model = Consis_Model()
-    trainer.fit(model, datamodule=dm)
-    
-    dm.setup('test')
-    
-    trainer.test(model, datamodule=dm)
 
